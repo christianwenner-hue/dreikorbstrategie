@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import altair as alt
-from datetime import datetime, timedelta
+from datetime import datetime
 import io
 
 # --- UI SETUP ---
@@ -24,10 +24,10 @@ def berechne_brutto_und_steuer(netto_ziel, gewinn_anteil, ist_etf=False):
     return round(brutto, 2), round(brutto - netto_ziel, 2)
 
 @st.cache_data(show_spinner=False, ttl=60)
-def lade_marktdaten(ticker, start_date):
+def lade_marktdaten(ticker):
     try:
-        fetch_start = start_date - timedelta(days=60)
-        raw = yf.download(ticker, start=fetch_start, interval="1mo", progress=False)
+        # HIER GEÄNDERT: period="max" holt alle Daten, die Yahoo Finance jemals für diesen Ticker hat!
+        raw = yf.download(ticker, period="max", interval="1mo", progress=False)
         
         if raw.empty: return pd.DataFrame()
             
@@ -46,12 +46,14 @@ def lade_marktdaten(ticker, start_date):
             "Rendite_Monat": returns.values.astype(float)
         })
         
-        df = df[df["Jahr"] >= start_date.year]
         return df.sort_values(["Jahr", "Monat"])
     except Exception:
         return pd.DataFrame()
 
-def simuliere_strategie(hist_df, k1_start, k2_start, k3_start, rente_start, p_pct, infl_pa, zins_k1_pa, zins_k2_pa):
+def simuliere_strategie(hist_df, start_jahr, k1_start, k2_start, k3_start, rente_start, p_pct, infl_pa, zins_k1_pa, zins_k2_pa):
+    df_sim = hist_df[hist_df["Jahr"] >= start_jahr]
+    if df_sim.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), None, None
+
     k1, k2, k3 = k1_start, k2_start, k3_start
     k3_g = k3 * p_pct
     
@@ -68,10 +70,10 @@ def simuliere_strategie(hist_df, k1_start, k2_start, k3_start, rente_start, p_pc
     pleite_jahr_3k = None
     pleite_jahr_vl = None
 
-    jahre = hist_df["Jahr"].unique()
+    jahre = df_sim["Jahr"].unique()
 
     for jahr in jahre:
-        df_jahr = hist_df[hist_df["Jahr"] == jahr]
+        df_jahr = df_sim[df_sim["Jahr"] == jahr]
         rj = (df_jahr["Rendite_Monat"] + 1).prod() - 1 
         q_letzte_aktion = ""
         
@@ -188,122 +190,167 @@ with st.sidebar:
 
 # --- 3. ANZEIGE & SIMULATION ---
 
-st.info("👈 **Tipp:** Klappe links die Seitenleiste auf, um deine Parameter einzustellen (falls sie auf deinem Bildschirm versteckt ist).")
+st.info("👈 **Tipp:** Wähle links den S&P 500, um historische Szenarien bis weit ins letzte Jahrhundert zu testen!")
 
-with st.spinner("Lade historische Marktdaten von Yahoo Finance..."):
-    hist_df = lade_marktdaten(t_sym, s_dat)
+with st.spinner("Lade maximale historische Marktdaten von Yahoo Finance..."):
+    # HIER GEÄNDERT: Wir übergeben das Startdatum nicht mehr, die Funktion holt einfach alles
+    hist_df = lade_marktdaten(t_sym)
 
 if hist_df.empty:
-    st.error(f"⚠️ Es konnten keine Marktdaten für '{idx_name}' ab dem Jahr {s_dat.year} geladen werden.")
+    st.error(f"⚠️ Es konnten keine Marktdaten geladen werden.")
 else:
-    st.success(f"✅ Historische Daten erfolgreich geladen! ({len(hist_df)} Monate gefunden). Klicke auf den Button, um die Strategie zu simulieren.")
+    erstes_jahr = hist_df["Jahr"].min()
+    st.success(f"✅ Maximale Historie geladen! Daten für **{idx_name}** reichen zurück bis ins Jahr **{erstes_jahr}**.")
     
     if st.button("🚀 Simulation jetzt starten", type="primary", use_container_width=True):
         
+        # 1. Die Hauptsimulation (für das gewählte Startjahr in der Sidebar)
         df_3k, df_v, df_plot, pleite_3k, pleite_vl = simuliere_strategie(
-            hist_df, k1_s, k2_s, k3_s, n_monat, p_pct, infl, zins_k1, zins_k2
+            hist_df, s_dat.year, k1_s, k2_s, k3_s, n_monat, p_pct, infl, zins_k1, zins_k2
         )
         
         st.divider()
         
-        # --- 4. KPIs ---
-        start_gesamt = k1_s + k2_s + k3_s
-        end_3k = df_plot["Dreikorb"].iloc[-1]
-        end_vl = df_plot["Vollinvestition"].iloc[-1]
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Startkapital", f"{start_gesamt:,.0f} €".replace(",", "."))
-        with col2:
-            delta_3k = end_3k - start_gesamt
-            st.metric("Endvermögen Dreikorb", f"{end_3k:,.0f} €".replace(",", "."), f"{delta_3k:,.0f} €", delta_color="normal")
-            if pleite_3k: st.error(f"🚨 Dreikorb pleite im Jahr {pleite_3k}")
-        with col3:
-            delta_vl = end_vl - start_gesamt
-            st.metric("Endvermögen Vollinvestition", f"{end_vl:,.0f} €".replace(",", "."), f"{delta_vl:,.0f} €", delta_color="normal")
-            if pleite_vl: st.error(f"🚨 Vollinvestition pleite im Jahr {pleite_vl}")
+        if df_plot.empty:
+            st.error("Das gewählte Startdatum liegt vor dem Auflegungsdatum dieses Index/ETFs. Bitte wähle ein jüngeres Startdatum oder einen Index mit längerer Historie (z.B. S&P 500).")
+        else:
+            start_gesamt = k1_s + k2_s + k3_s
+            end_3k = df_plot["Dreikorb"].iloc[-1]
+            end_vl = df_plot["Vollinvestition"].iloc[-1]
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Startkapital", f"{start_gesamt:,.0f} €".replace(",", "."))
+            with col2:
+                delta_3k = end_3k - start_gesamt
+                st.metric("Endvermögen Dreikorb", f"{end_3k:,.0f} €".replace(",", "."), f"{delta_3k:,.0f} €", delta_color="normal")
+                if pleite_3k: st.error(f"🚨 Dreikorb pleite im Jahr {pleite_3k}")
+            with col3:
+                delta_vl = end_vl - start_gesamt
+                st.metric("Endvermögen Vollinvestition", f"{end_vl:,.0f} €".replace(",", "."), f"{delta_vl:,.0f} €", delta_color="normal")
+                if pleite_vl: st.error(f"🚨 Vollinvestition pleite im Jahr {pleite_vl}")
 
-        st.divider()
+            st.divider()
 
-        # --- 5. VISUALISIERUNG: Gestapeltes Flächendiagramm ---
-        st.subheader("Entwicklung der drei Körbe (Gestapelt)")
-        df_area = df_plot[["Datum", "K1_Wert", "K2_Wert", "K3_Wert"]].melt(
-            id_vars="Datum", var_name="Korb", value_name="Kapital"
-        )
-        area_chart = alt.Chart(df_area).mark_area().encode(
-            x=alt.X("Datum:T", title="Jahr"),
-            y=alt.Y("Kapital:Q", title="Kapital in €", stack=True),
-            color=alt.Color("Korb:N", scale=alt.Scale(domain=["K3_Wert", "K2_Wert", "K1_Wert"], range=["#2ca02c", "#ff7f0e", "#1f77b4"])),
-            tooltip=["Datum:T", "Korb:N", alt.Tooltip("Kapital:Q", format=",.0f")]
-        ).interactive()
-        st.altair_chart(area_chart, use_container_width=True)
+            st.subheader("Entwicklung der drei Körbe (Gestapelt)")
+            df_area = df_plot[["Datum", "K1_Wert", "K2_Wert", "K3_Wert"]].melt(
+                id_vars="Datum", var_name="Korb", value_name="Kapital"
+            )
+            area_chart = alt.Chart(df_area).mark_area().encode(
+                x=alt.X("Datum:T", title="Jahr"),
+                y=alt.Y("Kapital:Q", title="Kapital in €", stack=True),
+                color=alt.Color("Korb:N", scale=alt.Scale(domain=["K3_Wert", "K2_Wert", "K1_Wert"], range=["#2ca02c", "#ff7f0e", "#1f77b4"])),
+                tooltip=["Datum:T", "Korb:N", alt.Tooltip("Kapital:Q", format=",.0f")]
+            ).interactive()
+            st.altair_chart(area_chart, use_container_width=True)
 
-        # --- 6. VISUALISIERUNG: Vergleichslinie ---
-        st.subheader("Vergleich: Dreikorb vs. Vollinvestition")
-        df_plot["DK_Euro"] = df_plot["Dreikorb"].map('{:,.0f} €'.format)
-        df_plot["VL_Euro"] = df_plot["Vollinvestition"].map('{:,.0f} €'.format)
-        
-        base_chart = alt.Chart(df_plot).encode(x=alt.X('Jahr_Int:O', title='Jahr'))
-        line_dk = base_chart.mark_line(size=3, color='#1f77b4').encode(y=alt.Y('Dreikorb:Q', title='Vermögen'))
-        line_vl = base_chart.mark_line(size=3, color='#ff7f0e', strokeDash=[5,5]).encode(y='Vollinvestition:Q')
-        
-        selector = alt.selection_point(fields=['Jahr_Int'], nearest=True, on='mouseover', empty=False)
-        points = base_chart.mark_point(size=100, opacity=0).encode(
-            y='Dreikorb:Q',
-            tooltip=[
-                alt.Tooltip('Jahr_Int:N', title='Jahr'),
-                alt.Tooltip('Rendite:N', title='Marktrendite'),
-                alt.Tooltip('DK_Euro:N', title='Dreikorb'),
-                alt.Tooltip('VL_Euro:N', title='Vollinvest'),
-                alt.Tooltip('Aktion:N', title='Letzte Aktion')
-            ]
-        ).add_params(selector)
-        st.altair_chart(line_dk + line_vl + points, use_container_width=True)
+            st.subheader("Vergleich: Dreikorb vs. Vollinvestition")
+            df_plot["DK_Euro"] = df_plot["Dreikorb"].map('{:,.0f} €'.format)
+            df_plot["VL_Euro"] = df_plot["Vollinvestition"].map('{:,.0f} €'.format)
+            
+            base_chart = alt.Chart(df_plot).encode(x=alt.X('Jahr_Int:O', title='Jahr'))
+            line_dk = base_chart.mark_line(size=3, color='#1f77b4').encode(y=alt.Y('Dreikorb:Q', title='Vermögen'))
+            line_vl = base_chart.mark_line(size=3, color='#ff7f0e', strokeDash=[5,5]).encode(y='Vollinvestition:Q')
+            
+            selector = alt.selection_point(fields=['Jahr_Int'], nearest=True, on='mouseover', empty=False)
+            points = base_chart.mark_point(size=100, opacity=0).encode(
+                y='Dreikorb:Q',
+                tooltip=[
+                    alt.Tooltip('Jahr_Int:N', title='Jahr'),
+                    alt.Tooltip('Rendite:N', title='Marktrendite'),
+                    alt.Tooltip('DK_Euro:N', title='Dreikorb'),
+                    alt.Tooltip('VL_Euro:N', title='Vollinvest'),
+                    alt.Tooltip('Aktion:N', title='Letzte Aktion')
+                ]
+            ).add_params(selector)
+            st.altair_chart(line_dk + line_vl + points, use_container_width=True)
+            
+            # --- 7. EXCEL EXPORT ---
+            excel_buffer = io.BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                df_3k.to_excel(writer, index=False, sheet_name='Dreikorb_Details')
+                df_v.to_excel(writer, index=False, sheet_name='Vollinvestition')
+                df_plot.drop(columns=["Datum", "DK_Euro", "VL_Euro"]).to_excel(writer, index=False, sheet_name='Jahresübersicht')
+            
+            st.download_button(
+                label="📥 Detaillierte Excel-Simulation herunterladen", 
+                data=excel_buffer.getvalue(), 
+                file_name="Dreikorb_Simulation.xlsx", 
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            
+            # --- 8. ROLLIERENDE STARTJAHRE ---
+            st.divider()
+            st.header("🎯 Szenario-Analyse: Welches Startjahr begünstigt welche Strategie?")
+            st.write("Diese Auswertung simuliert den Renteneintritt für **jedes historisch verfügbare Jahr** (bis vor 5 Jahren) und zeigt dir den Vermögensunterschied am Ende der Laufzeit.")
+            
+            with st.spinner("Berechne alle historischen Szenarien..."):
+                alle_jahre = sorted(hist_df["Jahr"].unique())
+                letztes_erlaubtes_jahr = datetime.now().year - 4 
+                test_jahre = [j for j in alle_jahre if j <= letztes_erlaubtes_jahr]
+                
+                szenarien_ergebnisse = []
+                
+                for test_jahr in test_jahre:
+                    _, _, temp_plot, _, _ = simuliere_strategie(
+                        hist_df, test_jahr, k1_s, k2_s, k3_s, n_monat, p_pct, infl, zins_k1, zins_k2
+                    )
+                    
+                    if not temp_plot.empty:
+                        end_dk_test = temp_plot["Dreikorb"].iloc[-1]
+                        end_vl_test = temp_plot["Vollinvestition"].iloc[-1]
+                        differenz = end_dk_test - end_vl_test
+                        
+                        if differenz > 0:
+                            gewinner = "Dreikorb"
+                            farbe = "#1f77b4"
+                        elif differenz < 0:
+                            gewinner = "Vollinvestition"
+                            farbe = "#ff7f0e"
+                        else:
+                            gewinner = "Gleichstand"
+                            farbe = "#808080"
+                            
+                        szenarien_ergebnisse.append({
+                            "Startjahr": test_jahr,
+                            "Gewinner": gewinner,
+                            "Mehrwert der Gewinnerstrategie (€)": abs(differenz),
+                            "Differenz_Plot": differenz, 
+                            "Farbe": farbe
+                        })
+                
+                df_szenarien = pd.DataFrame(szenarien_ergebnisse)
+                
+                if not df_szenarien.empty:
+                    st.write("**Differenz am Laufzeitende (Balken nach Oben = Dreikorb gewinnt | Balken nach Unten = Vollinvestition gewinnt):**")
+                    bar_chart = alt.Chart(df_szenarien).mark_bar().encode(
+                        x=alt.X("Startjahr:O", title="Simulierter Rentenbeginn (Startjahr)"),
+                        y=alt.Y("Differenz_Plot:Q", title="Vermögensdifferenz in €"),
+                        color=alt.Color("Farbe:N", scale=None), 
+                        tooltip=[
+                            alt.Tooltip("Startjahr:O"),
+                            alt.Tooltip("Gewinner:N"),
+                            alt.Tooltip("Mehrwert der Gewinnerstrategie (€):Q", format=",.0f")
+                        ]
+                    ).interactive()
+                    
+                    st.altair_chart(bar_chart, use_container_width=True)
+                    
+                    siege_dk = len(df_szenarien[df_szenarien["Gewinner"] == "Dreikorb"])
+                    siege_vl = len(df_szenarien[df_szenarien["Gewinner"] == "Vollinvestition"])
+                    st.info(f"**Fazit der Simulationen ({erstes_jahr} bis {letztes_erlaubtes_jahr}):** Bei {len(df_szenarien)} getesteten historischen Startjahren war die **Dreikorbstrategie in {siege_dk} Fällen** am Ende überlegen, die **Vollinvestition in {siege_vl} Fällen**.")
 
-        # --- 7. EXCEL EXPORT ---
-        excel_buffer = io.BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-            df_3k.to_excel(writer, index=False, sheet_name='Dreikorb_Details')
-            df_v.to_excel(writer, index=False, sheet_name='Vollinvestition')
-            df_plot.drop(columns=["Datum", "DK_Euro", "VL_Euro"]).to_excel(writer, index=False, sheet_name='Jahresübersicht')
-        
-        st.download_button(
-            label="📥 Detaillierte Excel-Simulation herunterladen", 
-            data=excel_buffer.getvalue(), 
-            file_name="Dreikorb_Simulation.xlsx", 
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-# --- 8. README / ERKLÄRUNG AM ENDE DER SEITE ---
+# --- 9. README ---
 st.divider()
 with st.expander("📖 Erklärung lesen: Das Konzept & die Rebalancing-Logik", expanded=False):
     st.markdown("""
     ## 🧺 Das Konzept der Dreikorbstrategie
     Die Strategie teilt das Vermögen in drei Töpfe (Körbe) auf, um in schlechten Börsenphasen keine Aktien mit Verlust verkaufen zu müssen:
+    * **Korb 1 (Cash / Tagesgeld):** Dient der kurzfristigen Liquidität. Hier liegt das Geld für die Entnahmen der nächsten Jahre.
+    * **Korb 2 (Anleihen / Festgeld):** Mittelfristige Anlage. Bringt etwas mehr Zinsen als Korb 1 und dient als Puffer.
+    * **Korb 3 (Aktien / ETFs):** Der Renditemotor. Hier liegt der größte Teil des Geldes langfristig investiert.
 
-    * **Korb 1 (Cash / Tagesgeld):** Dient der kurzfristigen Liquidität. Hier liegt das Geld für die Entnahmen der nächsten Jahre. Schwankt nicht, bringt aber nur geringe Zinsen.
-    * **Korb 2 (Anleihen / Festgeld):** Mittelfristige Anlage. Bringt etwas mehr Zinsen als Korb 1 und dient als Puffer, falls die Aktienmärkte länger schwächeln.
-    * **Korb 3 (Aktien / ETFs):** Der Renditemotor. Hier liegt der größte Teil des Geldes langfristig investiert, um die Inflation auszugleichen und das Vermögen zu mehren.
-
-    ---
-
-    ## 🔄 Wie funktioniert das Rebalancing in dieser App?
-    Das Herzstück der Simulation ist die Umschichtungs- und Entnahmelogik. Jeden Monat wird geprüft, aus welchem Korb die Rente entnommen wird, und am Jahresende wird (falls möglich) rebalanced. 
-
-    Die Regeln im Code lauten wie folgt:
-
-    ### 1. Woher kommt die monatliche Rente?
-    Die App schaut sich an, wie das aktuelle Jahr an der Börse läuft (Jahresrendite des Index positiv oder negativ?).
-
-    * **Szenario A (Die Börse steigt):** Die monatliche Rente wird **direkt aus Korb 3 (Aktien)** entnommen. Wir nehmen also Gewinne mit. Die Körbe 1 und 2 werden nicht angetastet und verzinsen sich weiter.
-    * **Szenario B (Die Börse fällt / Crash):** Korb 3 wird in Ruhe gelassen, damit sich die Aktienkurse erholen können ("Aussitzen"). Die Rente wird stattdessen aus dem sicheren **Korb 1 (Cash)** entnommen.
-      * *Wasserfall-Prinzip:* Ist Korb 1 leer, wird die Rente aus **Korb 2** entnommen.
-      * *Notverkauf:* Erst wenn Korb 1 UND Korb 2 komplett leer sind, ist man gezwungen, Aktien aus Korb 3 mit Verlust zu verkaufen.
-
-    ### 2. Das Rebalancing (Auffüllen am Jahresende)
-    Am Ende jedes simulierten Jahres (Dezember) prüft das System, ob die Cash-Puffer wieder aufgefüllt werden müssen.
-
-    * **Die Bedingung:** Ein Rebalancing findet **nur dann** statt, wenn das abgelaufene Börsenjahr positiv war (Rendite > 0). Wir verkaufen niemals nach einem Crash.
-    * **Der Ablauf:** War das Jahr erfolgreich, wird geprüft, wie viel Geld in Korb 1 und Korb 2 im Vergleich zu ihren Startwerten fehlt (z. B. weil in einem vorherigen Krisenjahr daraus entnommen wurde).
-    * **Die Umschichtung:** Dieser Fehlbetrag wird aus Korb 3 (Aktien) entnommen und in Korb 1 und Korb 2 umgeschichtet. Die Puffer sind damit für die nächste Krise wieder voll aufgefüllt.
+    ## 🔄 Rebalancing-Logik
+    * **Börse steigt:** Rente wird aus Korb 3 (Aktien) entnommen (Gewinnmitnahme). Am Jahresende wird geprüft, ob K1 und K2 aufgefüllt werden müssen.
+    * **Börse fällt:** Korb 3 wird geschont. Rente kommt aus Korb 1 (Cash). Ist dieser leer, aus Korb 2. Erst wenn K1 und K2 leer sind, droht ein Notverkauf aus Korb 3.
     """)
